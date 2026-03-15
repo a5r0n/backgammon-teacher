@@ -10,6 +10,9 @@
 	import type { BoardState, DiceRoll, MoveRecord, PositionAnalysis, BlunderLevel } from '$lib/backgammon/types.js';
 	import type { ExplanationResult } from '$lib/llm/prompt.js';
 	import type { FeatureDelta } from '$lib/features/types.js';
+	import { analyzePosition } from '$lib/analysis/gnubg-wasm.js';
+	import { compareFeatures } from '$lib/features/extract.js';
+	import { classifyMove } from '$lib/game/blunder.js';
 
 	let signedIn = $state(false);
 	let games: SavedGame[] = $state([]);
@@ -71,7 +74,7 @@
 				headers: { 'Authorization': `Bearer ${token}` }
 			});
 			if (!res.ok) throw new Error(`Failed to load games (${res.status})`);
-			const data = await res.json();
+			const data = await res.json() as { games: SavedGame[] };
 			games = data.games;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load games';
@@ -120,28 +123,19 @@
 			}
 
 			try {
+				if (controller.signal.aborted) break;
 				const ctx = getMoveContext(rec);
-				const res = await fetch('/api/analyze', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						board: ctx.board,
-						dice: rec.dice,
-						playedMove: ctx.move
-					}),
-					signal: controller.signal
-				});
-				if (!res.ok) {
-					batchProgress++;
-					continue;
-				}
-				const data = await res.json();
+				const analysisResult = await analyzePosition(ctx.board, rec.dice, ctx.move);
+				const pBoard = applyMove(ctx.board, ctx.move);
+				const bBoard = applyMove(ctx.board, analysisResult.bestMove.move);
+				const features = compareFeatures(pBoard, bBoard);
+				const bl = classifyMove(analysisResult.equityLoss, { preset: 'normal', blunderThreshold: 0.08 });
 
 				const cached: CachedAnalysis = {
-					analysis: data.analysis,
-					blunderLevel: data.blunderLevel,
-					notableDeltas: data.features?.notableDeltas || [],
-					features: data.features || null,
+					analysis: { ...analysisResult, positionType: features.playedFeatures.positionType },
+					blunderLevel: bl,
+					notableDeltas: features.notableDeltas || [],
+					features: { playedFeatures: features.playedFeatures, bestFeatures: features.bestFeatures, notableDeltas: features.notableDeltas || [], deltas: features.deltas || [] },
 					explanation: null
 				};
 				setCached(index, cached);
@@ -153,7 +147,6 @@
 					notableDeltas = cached.notableDeltas;
 				}
 			} catch (e) {
-				if (e instanceof DOMException && e.name === 'AbortError') break;
 				console.warn(`Batch analysis failed for move ${index}:`, e);
 			}
 			batchProgress++;
@@ -242,26 +235,19 @@
 			const ctx = getMoveContext(rec);
 			// If batch analysis hasn't reached this move yet, do a single analysis
 			if (!analysisCache.has(moveIndex)) {
-				const res = await fetch('/api/analyze', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						board: ctx.board,
-						dice: rec.dice,
-						playedMove: ctx.move
-					}),
-					signal: controller.signal
-				});
-				if (!res.ok) throw new Error('Analysis failed');
-				const data = await res.json();
+				const analysisResult = await analyzePosition(ctx.board, rec.dice, ctx.move);
+				const pBoard = applyMove(ctx.board, ctx.move);
+				const bBoard = applyMove(ctx.board, analysisResult.bestMove.move);
+				const features = compareFeatures(pBoard, bBoard);
+				const bl = classifyMove(analysisResult.equityLoss, { preset: 'normal', blunderThreshold: 0.08 });
 
 				if (currentMoveIndex !== moveIndex) return;
 
 				const cached: CachedAnalysis = {
-					analysis: data.analysis,
-					blunderLevel: data.blunderLevel,
-					notableDeltas: data.features?.notableDeltas || [],
-					features: data.features || null,
+					analysis: { ...analysisResult, positionType: features.playedFeatures.positionType },
+					blunderLevel: bl,
+					notableDeltas: features.notableDeltas || [],
+					features: { playedFeatures: features.playedFeatures, bestFeatures: features.bestFeatures, notableDeltas: features.notableDeltas || [], deltas: features.deltas || [] },
 					explanation: null
 				};
 				setCached(moveIndex, cached);
@@ -290,16 +276,16 @@
 						bestMove: cached.analysis.bestMove.move,
 						analysis: cached.analysis,
 						features: {
-							playedFeatures: feat.played || feat.playedFeatures || {},
-							bestFeatures: feat.best || feat.bestFeatures || {},
-							notableDeltas: feat.notableDeltas || cached.notableDeltas || [],
-							deltas: feat.deltas || []
+							playedFeatures: (feat as any).playedFeatures || {},
+							bestFeatures: (feat as any).bestFeatures || {},
+							notableDeltas: (feat as any).notableDeltas || cached.notableDeltas || [],
+							deltas: (feat as any).deltas || []
 						}
 					}),
 					signal: controller.signal
 				});
 				if (explainRes.ok && currentMoveIndex === moveIndex) {
-					const explainData = await explainRes.json();
+					const explainData = await explainRes.json() as { explanation: ExplanationResult };
 					explanation = explainData.explanation;
 					setCached(moveIndex, { ...cached, explanation: explainData.explanation });
 				}

@@ -33,4 +33,5 @@ vite.config.ts.timestamp-*
 test-game.ts
 screenshot-*.jpg
 test-results/
+playwright-report/
 deploy.sh

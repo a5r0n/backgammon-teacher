@@ -6,7 +6,19 @@ declare global {
 		// interface Locals {}
 		// interface PageData {}
 		// interface PageState {}
-		// interface Platform {}
+		interface Platform {
+			env: {
+				DB: D1Database;
+				GAME_FILES: R2Bucket;
+				AUTH_CACHE: KVNamespace;
+				AI: Ai;
+				LLM_PROVIDER: string;
+				LLM_API_KEY: string;
+				PUBLIC_GOOGLE_CLIENT_ID: string;
+				AI_GATEWAY_ACCOUNT_ID: string;
+				AI_GATEWAY_NAME: string;
+			};
+		}
 	}
 
 	interface Window {

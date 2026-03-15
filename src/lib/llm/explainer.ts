@@ -1,10 +1,15 @@
 /**
  * LLM explanation layer.
- * Abstract provider interface so OpenAI / Anthropic / local can be swapped.
+ * Abstract provider interface — Anthropic, OpenAI, Workers AI, or mock.
+ * All providers receive env via constructor (no module-level $env imports).
  */
 
-import { env } from '$env/dynamic/private';
-import { buildSystemPrompt, buildExplanationPrompt, type ExplanationRequest, type ExplanationResult } from './prompt.js';
+import {
+	buildSystemPrompt,
+	buildExplanationPrompt,
+	type ExplanationRequest,
+	type ExplanationResult
+} from './prompt.js';
 
 /**
  * Abstract LLM provider interface.
@@ -15,20 +20,26 @@ export interface LLMProvider {
 }
 
 /**
- * Anthropic Claude provider.
+ * Anthropic Claude provider — routes through AI Gateway when configured.
  */
 class AnthropicProvider implements LLMProvider {
 	name = 'anthropic';
+	constructor(private env: App.Platform['env']) {}
 
 	async generateExplanation(systemPrompt: string, userPrompt: string): Promise<string> {
-		const apiKey = env.LLM_API_KEY;
-		if (!apiKey) throw new Error('LLM_API_KEY not set');
+		const { AI_GATEWAY_ACCOUNT_ID, AI_GATEWAY_NAME, LLM_API_KEY } = this.env;
+		if (!LLM_API_KEY) throw new Error('LLM_API_KEY not set');
 
-		const response = await fetch('https://api.anthropic.com/v1/messages', {
+		const baseUrl =
+			AI_GATEWAY_ACCOUNT_ID && AI_GATEWAY_NAME
+				? `https://gateway.ai.cloudflare.com/v1/${AI_GATEWAY_ACCOUNT_ID}/${AI_GATEWAY_NAME}/anthropic`
+				: 'https://api.anthropic.com';
+
+		const response = await fetch(`${baseUrl}/v1/messages`, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
-				'x-api-key': apiKey,
+				'x-api-key': LLM_API_KEY,
 				'anthropic-version': '2023-06-01'
 			},
 			body: JSON.stringify({
@@ -43,26 +54,32 @@ class AnthropicProvider implements LLMProvider {
 			throw new Error(`Anthropic API error: ${response.status} ${await response.text()}`);
 		}
 
-		const data = await response.json();
+		const data: any = await response.json();
 		return data.content[0].text;
 	}
 }
 
 /**
- * OpenAI provider.
+ * OpenAI provider — routes through AI Gateway when configured.
  */
 class OpenAIProvider implements LLMProvider {
 	name = 'openai';
+	constructor(private env: App.Platform['env']) {}
 
 	async generateExplanation(systemPrompt: string, userPrompt: string): Promise<string> {
-		const apiKey = env.LLM_API_KEY;
-		if (!apiKey) throw new Error('LLM_API_KEY not set');
+		const { AI_GATEWAY_ACCOUNT_ID, AI_GATEWAY_NAME, LLM_API_KEY } = this.env;
+		if (!LLM_API_KEY) throw new Error('LLM_API_KEY not set');
 
-		const response = await fetch('https://api.openai.com/v1/chat/completions', {
+		const baseUrl =
+			AI_GATEWAY_ACCOUNT_ID && AI_GATEWAY_NAME
+				? `https://gateway.ai.cloudflare.com/v1/${AI_GATEWAY_ACCOUNT_ID}/${AI_GATEWAY_NAME}/openai`
+				: 'https://api.openai.com';
+
+		const response = await fetch(`${baseUrl}/v1/chat/completions`, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
-				Authorization: `Bearer ${apiKey}`
+				Authorization: `Bearer ${LLM_API_KEY}`
 			},
 			body: JSON.stringify({
 				model: 'gpt-4o',
@@ -79,81 +96,27 @@ class OpenAIProvider implements LLMProvider {
 			throw new Error(`OpenAI API error: ${response.status} ${await response.text()}`);
 		}
 
-		const data = await response.json();
+		const data: any = await response.json();
 		return data.choices[0].message.content;
 	}
 }
 
 /**
- * Google Gemini provider via Vertex AI.
- * Uses Application Default Credentials (gcloud auth / service account).
+ * Cloudflare Workers AI provider.
  */
-class GeminiProvider implements LLMProvider {
-	name = 'gemini';
+class WorkersAIProvider implements LLMProvider {
+	name = 'workers-ai';
+	constructor(private ai: Ai) {}
 
 	async generateExplanation(systemPrompt: string, userPrompt: string): Promise<string> {
-		const project = env.GCP_PROJECT;
-		const location = env.GCP_LOCATION || 'us-central1';
-		const model = env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview';
-
-		if (!project) throw new Error('GCP_PROJECT not set');
-
-		const accessToken = await getGcpAccessToken();
-		const host = location === 'global'
-			? 'aiplatform.googleapis.com'
-			: `${location}-aiplatform.googleapis.com`;
-		const url = `https://${host}/v1beta1/projects/${project}/locations/${location}/publishers/google/models/${model}:generateContent`;
-
-		const response = await fetch(url, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				Authorization: `Bearer ${accessToken}`
-			},
-			body: JSON.stringify({
-				systemInstruction: { parts: [{ text: systemPrompt }] },
-				contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-				generationConfig: {
-					maxOutputTokens: 4096,
-					responseMimeType: 'application/json'
-				}
-			})
+		const result: any = await this.ai.run('@cf/meta/llama-3.1-70b-instruct' as any, {
+			messages: [
+				{ role: 'system', content: systemPrompt },
+				{ role: 'user', content: userPrompt }
+			]
 		});
-
-		if (!response.ok) {
-			throw new Error(`Vertex AI error: ${response.status} ${await response.text()}`);
-		}
-
-		const data = await response.json();
-		return data.candidates[0].content.parts[0].text;
+		return result.response;
 	}
-}
-
-/**
- * Get a GCP access token via Application Default Credentials.
- * In dev: uses `gcloud auth print-access-token`.
- * In production (GCE/Cloud Run): uses the metadata server.
- */
-async function getGcpAccessToken(): Promise<string> {
-	// Try metadata server first (works on GCE, Cloud Run, GKE)
-	try {
-		const res = await fetch(
-			'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
-			{ headers: { 'Metadata-Flavor': 'Google' }, signal: AbortSignal.timeout(1000) }
-		);
-		if (res.ok) {
-			const data = await res.json();
-			return data.access_token;
-		}
-	} catch {
-		// Not on GCP — fall through to gcloud
-	}
-
-	// Fall back to gcloud CLI (local dev)
-	const { execSync } = await import('child_process');
-	const token = execSync('gcloud auth print-access-token', { encoding: 'utf-8' }).trim();
-	if (!token) throw new Error('Failed to get access token from gcloud');
-	return token;
 }
 
 /**
@@ -175,31 +138,31 @@ class MockProvider implements LLMProvider {
 	}
 }
 
-const providers: Record<string, () => LLMProvider> = {
-	anthropic: () => new AnthropicProvider(),
-	openai: () => new OpenAIProvider(),
-	gemini: () => new GeminiProvider(),
-	mock: () => new MockProvider()
-};
-
 /**
  * Get the configured LLM provider.
  */
-export function getLLMProvider(): LLMProvider {
+export function getLLMProvider(env: App.Platform['env']): LLMProvider {
 	const providerName = env.LLM_PROVIDER || 'mock';
-	const factory = providers[providerName];
-	if (!factory) {
-		console.warn(`Unknown LLM provider "${providerName}", falling back to mock`);
-		return new MockProvider();
+	switch (providerName) {
+		case 'anthropic':
+			return new AnthropicProvider(env);
+		case 'openai':
+			return new OpenAIProvider(env);
+		case 'workers-ai':
+			return new WorkersAIProvider(env.AI);
+		default:
+			return new MockProvider();
 	}
-	return factory();
 }
 
 /**
  * Generate an explanation for a blunder.
  */
-export async function explainBlunder(request: ExplanationRequest): Promise<ExplanationResult> {
-	const provider = getLLMProvider();
+export async function explainBlunder(
+	request: ExplanationRequest,
+	env: App.Platform['env']
+): Promise<ExplanationResult> {
+	const provider = getLLMProvider(env);
 	const systemPrompt = buildSystemPrompt();
 	const userPrompt = buildExplanationPrompt(request);
 
@@ -207,7 +170,10 @@ export async function explainBlunder(request: ExplanationRequest): Promise<Expla
 
 	try {
 		// Extract JSON from response (handle markdown code blocks)
-		const jsonStr = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+		const jsonStr = raw
+			.replace(/```json\n?/g, '')
+			.replace(/```\n?/g, '')
+			.trim();
 		const parsed = JSON.parse(jsonStr);
 		return {
 			summary: parsed.summary || 'Analysis unavailable',

@@ -77,7 +77,7 @@ function createAuthStore() {
 			if (typeof window !== 'undefined' && window.google?.accounts?.id) {
 				return new Promise<string | null>((resolve) => {
 					const timeout = setTimeout(() => resolve(null), 5000);
-					window.google.accounts.id.initialize({
+					window.google!.accounts.id.initialize({
 						client_id: state.idToken ? decodeJwtPayload(state.idToken)?.aud as string : '',
 						callback: (response: { credential: string }) => {
 							clearTimeout(timeout);
@@ -99,7 +99,7 @@ function createAuthStore() {
 						},
 						auto_select: true
 					});
-					window.google.accounts.id.prompt();
+					window.google!.accounts.id.prompt();
 				});
 			}
 
