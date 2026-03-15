@@ -21,7 +21,7 @@
 	"kv_namespaces": [
 		{
 			"binding": "AUTH_CACHE",
-			"id": "<to-be-created>"
+			"id": "03e6794100d945e8af3d1aeeaa5292aa"
 		}
 	],
 	"ai": { "binding": "AI" }
