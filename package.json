@@ -12,12 +12,13 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test": "vitest run",
 		"test:watch": "vitest",
+		"test:e2e": "playwright test",
 		"db:generate": "drizzle-kit generate",
 		"db:migrate": "wrangler d1 migrations apply backgammon-teacher"
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^4.20260313.1",
-		"@playwright/test": "^1.58.2",
+		"@playwright/test": "^1.56.1",
 		"@sveltejs/adapter-auto": "^7.0.0",
 		"@sveltejs/kit": "^2.50.2",
 		"@sveltejs/vite-plugin-svelte": "^6.2.4",
