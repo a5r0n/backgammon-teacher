@@ -75,7 +75,7 @@ export async function verifyGoogleToken(
 
 	// 5. Verify signature
 	const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
-	const signature = base64UrlDecode(signatureB64);
+	const signature = base64UrlDecode(signatureB64) as Uint8Array<ArrayBuffer>;
 	const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, data);
 	if (!valid) throw new Error('Invalid JWT signature');
 

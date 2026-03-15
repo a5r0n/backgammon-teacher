@@ -29,8 +29,8 @@ async function getUser(request: Request, env: App.Platform['env']): Promise<Auth
 export const POST: RequestHandler = async ({ request, platform }) => {
 	const env = platform!.env;
 	const user = await getUser(request, env);
-	const body = await request.json();
-	const game = body.game as SavedGame;
+	const body = await request.json() as { game: SavedGame };
+	const game = body.game;
 
 	if (!game?.id || !game.date) {
 		throw error(400, 'Missing required fields: game.id, game.date');

@@ -74,7 +74,7 @@
 				headers: { 'Authorization': `Bearer ${token}` }
 			});
 			if (!res.ok) throw new Error(`Failed to load games (${res.status})`);
-			const data = await res.json();
+			const data = await res.json() as { games: SavedGame[] };
 			games = data.games;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load games';
@@ -285,7 +285,7 @@
 					signal: controller.signal
 				});
 				if (explainRes.ok && currentMoveIndex === moveIndex) {
-					const explainData = await explainRes.json();
+					const explainData = await explainRes.json() as { explanation: ExplanationResult };
 					explanation = explainData.explanation;
 					setCached(moveIndex, { ...cached, explanation: explainData.explanation });
 				}

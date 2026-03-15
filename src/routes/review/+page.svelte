@@ -92,7 +92,7 @@
 				});
 
 				if (explainRes.ok) {
-					const explainData = await explainRes.json();
+					const explainData = await explainRes.json() as { explanation: ExplanationResult };
 					explanation = explainData.explanation;
 				}
 				explaining = false;
