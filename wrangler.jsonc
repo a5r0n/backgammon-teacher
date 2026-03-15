@@ -9,7 +9,7 @@
 		{
 			"binding": "DB",
 			"database_name": "backgammon-teacher",
-			"database_id": "<to-be-created>"
+			"database_id": "726f79bd-8f53-456e-b424-b1d542265ef2"
 		}
 	],
 	"r2_buckets": [
