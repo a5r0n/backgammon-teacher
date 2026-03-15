@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1773546720709,
+      "tag": "0000_lovely_chimera",
+      "breakpoints": true
+    }
+  ]
+}

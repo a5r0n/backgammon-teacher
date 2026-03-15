@@ -4,7 +4,7 @@
 
 import type { BoardState, DiceRoll, Difficulty, Move } from '$lib/backgammon/types.js';
 import { generateLegalMoves, isMoveLegal, applyMove } from '$lib/backgammon/rules.js';
-import { getGnubgAdapter } from '$lib/analysis/gnubg.js';
+import { analyzePosition } from '$lib/analysis/gnubg-wasm.js';
 
 /**
  * Get the computer's move for a position.
@@ -19,8 +19,7 @@ export async function getComputerMove(
 	difficulty: Difficulty
 ): Promise<Move> {
 	try {
-		const adapter = getGnubgAdapter();
-		const analysis = await adapter.analyzePosition(board, dice);
+		const analysis = await analyzePosition(board, dice);
 
 		if (analysis.candidates.length === 0) {
 			return { checkerMoves: [] };

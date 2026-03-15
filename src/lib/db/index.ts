@@ -1,17 +1,10 @@
 /**
- * Database client and helpers.
+ * Database client — Drizzle ORM over Cloudflare D1.
  */
 
-import { PrismaClient } from '@prisma/client';
+import { drizzle } from 'drizzle-orm/d1';
+import * as schema from './schema.js';
 
-// Singleton Prisma client
-let prisma: PrismaClient;
-
-export function getDb(): PrismaClient {
-	if (!prisma) {
-		prisma = new PrismaClient();
-	}
-	return prisma;
+export function getDb(d1: D1Database) {
+	return drizzle(d1, { schema });
 }
-
-export { prisma };

@@ -9,6 +9,9 @@
 	import type { ExplanationResult } from '$lib/llm/prompt.js';
 	import type { FeatureDelta } from '$lib/features/types.js';
 	import { SAMPLE_POSITIONS } from '$lib/data/samples.js';
+	import { analyzePosition } from '$lib/analysis/gnubg-wasm.js';
+	import { compareFeatures } from '$lib/features/extract.js';
+	import { classifyMove } from '$lib/game/blunder.js';
 
 	let board: BoardState = $state(initialBoard());
 	let originalBoard: BoardState = $state(initialBoard());
@@ -54,33 +57,22 @@
 		viewMode = 'original';
 
 		try {
-			const res = await fetch('/api/analyze', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					board,
-					dice,
-					playedMove: selectedMove
-				})
-			});
+			const analysisResult = await analyzePosition(board, dice, selectedMove);
+			const pBoard = applyMove(board, selectedMove);
+			const bBoard = applyMove(board, analysisResult.bestMove.move);
+			const features = compareFeatures(pBoard, bBoard);
+			const bl = classifyMove(analysisResult.equityLoss, { preset: 'normal', blunderThreshold: 0.08 });
 
-			if (!res.ok) throw new Error('Analysis failed');
+			analysis = { ...analysisResult, positionType: features.playedFeatures.positionType };
+			blunderLevel = bl;
+			notableDeltas = features.notableDeltas || [];
 
-			const data = await res.json();
-			analysis = data.analysis;
-			blunderLevel = data.blunderLevel;
-			notableDeltas = data.features?.notableDeltas || [];
-
-			// Compute result boards
-			playedBoard = applyMove(board, selectedMove);
-			if (analysis?.bestMove) {
-				bestBoard = applyMove(board, analysis.bestMove.move);
-			}
+			playedBoard = pBoard;
+			bestBoard = bBoard;
 
 			// Get explanation if blunder
-			if (data.blunderLevel !== 'none') {
+			if (bl !== 'none') {
 				explaining = true;
-				const feat = data.features;
 				const explainRes = await fetch('/api/explain', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
@@ -88,13 +80,13 @@
 						board,
 						dice,
 						playedMove: selectedMove,
-						bestMove: data.analysis.bestMove.move,
-						analysis: data.analysis,
+						bestMove: analysisResult.bestMove.move,
+						analysis: analysisResult,
 						features: {
-							playedFeatures: feat.played || feat.playedFeatures,
-							bestFeatures: feat.best || feat.bestFeatures,
-							notableDeltas: feat.notableDeltas || [],
-							deltas: feat.deltas || []
+							playedFeatures: features.playedFeatures,
+							bestFeatures: features.bestFeatures,
+							notableDeltas: features.notableDeltas || [],
+							deltas: features.deltas || []
 						}
 					})
 				});

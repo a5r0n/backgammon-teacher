@@ -2,7 +2,8 @@
 	import Board from '$lib/components/Board.svelte';
 	import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
 	import type {
-		GameState, Move, PositionAnalysis, BlunderLevel, BoardState, DiceRoll, CheckerMove
+		GameState, Move, PositionAnalysis, BlunderLevel, BoardState, DiceRoll, CheckerMove,
+		Difficulty
 	} from '$lib/backgammon/types.js';
 	import type { ExplanationResult } from '$lib/llm/prompt.js';
 	import type { FeatureDelta } from '$lib/features/types.js';
@@ -10,6 +11,11 @@
 	import { flipBoard, pipCount } from '$lib/backgammon/board.js';
 	import { BAR, OFF } from '$lib/backgammon/types.js';
 	import { auth } from '$lib/auth/authStore.js';
+	import { createGame as createNewGame, rollDice as rollGameDice, makeMove as applyGameMove, getLegalMoves, openingRoll, serializeGameState } from '$lib/game/gameState.js';
+	import { analyzePosition } from '$lib/analysis/gnubg-wasm.js';
+	import { applyMove } from '$lib/backgammon/rules.js';
+	import { compareFeatures } from '$lib/features/extract.js';
+	import { classifyMove } from '$lib/game/blunder.js';
 
 	let game: GameState | null = $state(null);
 	let legalMoves: Move[] = $state([]);
@@ -153,16 +159,8 @@
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 	}
 
-	/** Wrapper for game API calls: includes game state so server can auto-restore on any instance */
-	async function gameApiFetch(url: string, body: Record<string, any>): Promise<Response> {
-		// Always include current game state for multi-instance auto-restore
-		const payload = game ? { ...body, game } : body;
-		return fetch(url, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(payload)
-		});
-	}
+	// Client-side undo stack (one level deep)
+	let undoState: GameState | null = $state(null);
 
 	async function restoreFromStorage(): Promise<boolean> {
 		const raw = localStorage.getItem(STORAGE_KEY);
@@ -175,21 +173,8 @@
 				return false;
 			}
 
-			// Re-register game on server
-			const res = await fetch('/api/game?action=restore', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ game: data.game })
-			});
-
-			if (!res.ok) {
-				localStorage.removeItem(STORAGE_KEY);
-				return false;
-			}
-
-			const result = await res.json();
-			game = result.game;
-			legalMoves = result.legalMoves;
+			game = data.game;
+			legalMoves = game.turn === 'player' && game.diceRolled ? getLegalMoves(game) : [];
 			difficulty = data.game.difficulty || 'strong';
 			waitingForRoll = data.waitingForRoll || false;
 			status = data.status || '';
@@ -214,7 +199,7 @@
 			}
 
 			// If it was the computer's turn mid-move, re-trigger
-			if (!data.showAnalysis && result.game.turn === 'opponent' && result.game.diceRolled) {
+			if (!data.showAnalysis && game.turn === 'opponent' && game.diceRolled) {
 				await computerTurn();
 			}
 
@@ -259,27 +244,20 @@
 		waitingForRoll = false;
 		lastComputerDice = null;
 		lastComputerGhostMove = null;
+		undoState = null;
 
 		try {
-			const res = await fetch('/api/game?action=create', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ difficulty })
-			});
-			if (!res.ok) {
-				error = `Failed to create game (${res.status})`;
-				loading = false;
-				return;
-			}
-			const data = await res.json();
-			game = data.game;
-			legalMoves = data.legalMoves || [];
+			let newGame = createNewGame(difficulty as Difficulty);
+			const opening = openingRoll();
+			newGame = { ...newGame, dice: opening.dice, diceRolled: true, turn: opening.firstPlayer };
+			game = newGame;
+			legalMoves = game.turn === 'player' ? getLegalMoves(game) : [];
 
-			if (game?.turn === 'opponent') {
+			if (game.turn === 'opponent') {
 				status = "Computer's turn...";
 				await computerTurn();
 			} else {
-				status = `Your turn. Dice: ${game?.dice?.die1}-${game?.dice?.die2}`;
+				status = `Your turn. Dice: ${game.dice?.die1}-${game.dice?.die2}`;
 			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to start game';
@@ -305,33 +283,32 @@
 			const moveNumber = game.moveNumber;
 			const boardBeforeMove = game.board;
 
-			// Submit the move
-			const res = await gameApiFetch('/api/game?action=move', { gameId: game.id, move });
-			const data = await res.json();
-
-			if (!res.ok) {
-				error = data.message || 'Invalid move';
-				loading = false;
-				return;
+			// Save state for undo
+			if (game.turn === 'player') {
+				undoState = game;
 			}
+
+			// Apply the move client-side
+			const updated = applyGameMove(game, move);
+			const updatedLegalMoves = updated.turn === 'player' && updated.dice ? getLegalMoves(updated) : [];
 
 			// Analyze the player's move
 			await analyzeMove(boardBeforeMove, game.dice!, move, moveNumber);
 
 			// If blunder detected, pause and wait for Continue
 			if (showAnalysis) {
-				pendingGameData = { game: data.game, legalMoves: data.legalMoves || [] };
+				pendingGameData = { game: updated, legalMoves: updatedLegalMoves };
 				preMoveBoard = boardBeforeMove;
 				currentPlayedMove = move;
-				game = data.game;
+				game = updated;
 				legalMoves = [];
 				status = 'Review your move...';
 				loading = false;
 				return;
 			}
 
-			game = data.game;
-			legalMoves = data.legalMoves || [];
+			game = updated;
+			legalMoves = updatedLegalMoves;
 			await continueAfterMove();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Move failed';
@@ -371,23 +348,17 @@
 	}
 
 	async function takeBack() {
-		if (!game) return;
+		if (!game || !undoState) return;
 		const moveNumber = game.moveNumber - 1; // the move we're undoing
-		try {
-			const res = await gameApiFetch('/api/game?action=undo', { gameId: game.id });
-			if (!res.ok) return;
-			const data = await res.json();
-			game = data.game;
-			legalMoves = data.legalMoves || [];
-			showAnalysis = false;
-			pendingGameData = null;
-			preMoveBoard = null;
-			currentPlayedMove = null;
-			moveAnalysisMap.delete(moveNumber);
-			status = `Your turn. Dice: ${game?.dice?.die1}-${game?.dice?.die2}`;
-		} catch {
-			// undo failed, non-critical
-		}
+		game = undoState;
+		undoState = null;
+		legalMoves = game.dice ? getLegalMoves(game) : [];
+		showAnalysis = false;
+		pendingGameData = null;
+		preMoveBoard = null;
+		currentPlayedMove = null;
+		moveAnalysisMap.delete(moveNumber);
+		status = `Your turn. Dice: ${game?.dice?.die1}-${game?.dice?.die2}`;
 	}
 
 	async function rollForPlayer() {
@@ -396,14 +367,9 @@
 		lastComputerDice = null;
 		lastComputerGhostMove = null;
 
-		const res = await gameApiFetch('/api/game?action=roll', { gameId: game.id });
-		if (!res.ok) {
-			error = `Roll failed (${res.status}). Try starting a new game.`;
-			return;
-		}
-		const data = await res.json();
-		game = data.game;
-		legalMoves = data.legalMoves || [];
+		const updated = rollGameDice(game);
+		game = updated;
+		legalMoves = updated.turn === 'player' ? getLegalMoves(updated) : [];
 
 		// Auto-play pass if no legal moves
 		const isPass = legalMoves.length === 1 && legalMoves[0].checkerMoves.length === 0;
@@ -420,13 +386,8 @@
 	async function rollAndComputerTurn() {
 		if (!game) return;
 		// Roll dice for computer
-		const rollRes = await gameApiFetch('/api/game?action=roll', { gameId: game.id });
-		if (!rollRes.ok) {
-			error = `Computer roll failed (${rollRes.status}). Try starting a new game.`;
-			return;
-		}
-		const rollData = await rollRes.json();
-		game = rollData.game;
+		const updated = rollGameDice(game);
+		game = updated;
 		status = `Computer rolls ${game?.dice?.die1}-${game?.dice?.die2}...`;
 
 		await computerTurn();
@@ -438,47 +399,29 @@
 
 		try {
 			// Start fetching computer's move and dice animation delay in parallel
-			const movePromise = fetch('/api/computer-move', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					board: flipBoard(game.board),
-					dice: game.dice,
-					difficulty: game.difficulty
-				})
-			});
+			const { getComputerMove } = await import('$lib/game/enginePlayer.js');
+			const movePromise = getComputerMove(flipBoard(game.board), game.dice, game.difficulty);
 
 			// Let dice animation play
 			await new Promise((r) => setTimeout(r, 350));
 
-			const moveRes = await movePromise;
-			if (!moveRes.ok) {
-				error = `Computer move failed (${moveRes.status}). Try starting a new game.`;
-				return;
-			}
-			const moveData = await moveRes.json();
+			const computerMove = await movePromise;
 
-			// Apply the computer's move on server (don't update client game yet)
-			const applyRes = await gameApiFetch('/api/game?action=move', { gameId: game.id, move: moveData.move });
-			if (!applyRes.ok) {
-				const errBody = await applyRes.json().catch(() => ({}));
-				error = errBody.message || `Move apply failed (${applyRes.status}). Try starting a new game.`;
-				return;
-			}
-			const applyData = await applyRes.json();
+			// Apply the computer's move client-side
+			const updated = applyGameMove(game, computerMove);
 
-			const isPass = !moveData.move || moveData.move.checkerMoves.length === 0;
+			const isPass = !computerMove || computerMove.checkerMoves.length === 0;
 
 			// Animate checker moves before updating board state
 			if (!isPass && boardRef?.animateOpponentMove) {
-				const flipped = flipMoveToPlayerPerspective(moveData.move);
+				const flipped = flipMoveToPlayerPerspective(computerMove);
 				await boardRef.animateOpponentMove(flipped.checkerMoves);
 			}
 
 			// Now update client state
-			game = applyData.game;
+			game = updated;
 			lastComputerDice = computerDice;
-			lastComputerGhostMove = isPass ? null : flipMoveToPlayerPerspective(moveData.move);
+			lastComputerGhostMove = isPass ? null : flipMoveToPlayerPerspective(computerMove);
 
 			if (game?.gameOver) {
 				status = game.winner === 'player' ? 'You win!' : 'Computer wins!';
@@ -487,7 +430,7 @@
 				status = `Computer rolled ${computerDice.die1}-${computerDice.die2} — no legal moves. Your turn to roll.`;
 				waitingForRoll = true;
 			} else {
-				status = `Computer rolled ${computerDice.die1}-${computerDice.die2}: ${formatMove(moveData.move)}. Your turn to roll.`;
+				status = `Computer rolled ${computerDice.die1}-${computerDice.die2}: ${formatMove(computerMove)}. Your turn to roll.`;
 				waitingForRoll = true;
 			}
 		} catch (e) {
@@ -497,34 +440,32 @@
 
 	async function analyzeMove(board: BoardState, dice: { die1: number; die2: number }, move: Move, moveNumber: number) {
 		try {
-			const res = await fetch('/api/analyze', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ board, dice, playedMove: move })
-			});
+			const analysisResult = await analyzePosition(board, dice as DiceRoll, move);
 
-			if (!res.ok) return;
+			// Extract and compare features
+			const playedBoard = applyMove(board, move);
+			const bestBoard = applyMove(board, analysisResult.bestMove.move);
+			const features = compareFeatures(playedBoard, bestBoard);
+			const blunderLevel = classifyMove(analysisResult.equityLoss, { preset: 'normal', blunderThreshold: 0.08 });
 
-			const data = await res.json();
-			currentAnalysis = data.analysis;
-			currentBlunderLevel = data.blunderLevel;
-			notableDeltas = data.features?.notableDeltas || [];
+			currentAnalysis = { ...analysisResult, positionType: features.playedFeatures.positionType };
+			currentBlunderLevel = blunderLevel;
+			notableDeltas = features.notableDeltas || [];
 
 			// Track position equity and win probability
-			const src = data.analysis.playedMove ?? data.analysis.bestMove;
+			const src = analysisResult.playedMove ?? analysisResult.bestMove;
 			if (src?.equity != null) lastEquity = src.equity;
 			if (src?.winProb != null) lastWinProb = src.winProb;
 
 			// Store per-move analysis
 			moveAnalysisMap.set(moveNumber, {
-				equityLoss: data.analysis.equityLoss ?? 0,
-				blunderLevel: data.blunderLevel
+				equityLoss: analysisResult.equityLoss ?? 0,
+				blunderLevel
 			});
 
-			if (data.blunderLevel !== 'none' && pauseOnBlunders) {
-				// Get explanation for blunders
+			if (blunderLevel !== 'none' && pauseOnBlunders) {
 				showAnalysis = true;
-				await getExplanation(board, dice, move, data);
+				await getExplanation(board, dice, move, analysisResult, features);
 			}
 		} catch {
 			// Analysis failure is non-critical
@@ -535,11 +476,11 @@
 		board: BoardState,
 		dice: { die1: number; die2: number },
 		move: Move,
-		analysisData: any
+		analysisResult: PositionAnalysis,
+		features: any
 	) {
 		explaining = true;
 		try {
-			const feat = analysisData.features;
 			const res = await fetch('/api/explain', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -547,13 +488,13 @@
 					board,
 					dice,
 					playedMove: move,
-					bestMove: analysisData.analysis.bestMove.move,
-					analysis: analysisData.analysis,
+					bestMove: analysisResult.bestMove.move,
+					analysis: analysisResult,
 					features: {
-						playedFeatures: feat.played || feat.playedFeatures,
-						bestFeatures: feat.best || feat.bestFeatures,
-						notableDeltas: feat.notableDeltas || [],
-						deltas: feat.deltas || []
+						playedFeatures: features.playedFeatures,
+						bestFeatures: features.bestFeatures,
+						notableDeltas: features.notableDeltas || [],
+						deltas: features.deltas || []
 					}
 				})
 			});
